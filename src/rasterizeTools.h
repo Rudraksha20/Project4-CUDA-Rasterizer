@@ -17,6 +17,100 @@ struct AABB {
     glm::vec3 max;
 };
 
+struct LineSegment {
+	glm::vec3 vertex1;
+	glm::vec3 vertex2;
+
+	float slope;
+
+	float minY;
+	float maxY;
+};
+
+/*
+* Checks if two floats are within threshold of each other
+* i.e. Nearly equal
+*/
+__host__ __device__ static
+bool nearlyEqual(float f1, float f2) {
+	if (f1 > (f2 - SMALL_EPSILON) && f1 < (f2 + SMALL_EPSILON)) {
+		return true;
+	}
+	else {
+		return false;
+	}
+}
+
+/*
+* Gets the slope of the line segment
+*/
+__host__ __device__ static
+float getLineSegmentSlope(glm::vec3 point1, glm::vec3 point2) {
+	// HORIZONTAL LINE
+	if (nearlyEqual(point1[1], point2[1])) {
+		return 0.0f;
+	}
+	// VERTICLE LINE
+	else if (nearlyEqual(point1[0], point2[0])) {
+		return FLT_MAX;
+	}
+	else {
+		return ((point2[1] - point1[1]) / (point2[0] - point1[0]));
+	}
+}
+
+/**
+* Initializes a line segment
+*/
+__host__ __device__ static
+LineSegment createLineSegment(glm::vec3 point1, glm::vec3 point2) {
+	LineSegment LS;
+
+	LS.slope = getLineSegmentSlope(point1, point2);
+	
+	LS.minY = glm::min(point1[1], point2[1]);
+	LS.maxY = glm::max(point1[1], point2[1]);
+
+	LS.vertex1 = point1;
+	LS.vertex2 = point2;
+
+	return LS;
+}
+
+/*
+* Finds intersection with line segment
+*/
+__host__ __device__ static
+bool intersectWithLineSegemnt(LineSegment LS, int Y, float& minX, float& maxX, AABB aabb) {
+	if ((float)Y < LS.minY || (float)Y > LS.maxY) {
+		return false;
+	}
+	
+	if (LS.slope == 0) {
+		// HORIZONTAL LINE
+		minX = glm::min(minX, glm::min(LS.vertex1[0], LS.vertex2[0]));
+		maxX = glm::max(maxX, glm::max(LS.vertex1[0], LS.vertex2[0]));
+		return true;
+	}
+	else if (LS.slope == FLT_MAX) {
+		// VERTICAL LINE
+		minX = glm::min(minX, glm::min(LS.vertex1[0], LS.vertex2[0]));
+		maxX = glm::max(maxX, glm::max(LS.vertex1[0], LS.vertex2[0]));
+		return true;
+	}
+	else {
+		// P(X,Y) -> Point of intersection
+		float X = (Y - LS.vertex1[1]) / LS.slope + LS.vertex1[0];
+		if (X < aabb.min[0] || X > aabb.max[0]) {
+			return false;
+		}
+
+		minX = glm::min(minX, X);
+		maxX = glm::max(maxX, X);
+		return true;
+	}
+}
+
 /**
  * Multiplies a glm::mat4 matrix and a vec4.
  */

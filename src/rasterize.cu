@@ -18,6 +18,8 @@
 #include <glm/gtc/quaternion.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 
+#define NAIVE_EDGEINTERSECTION_SCANLINE_TOGGLE 1	// 0 - Naive scanline & 1 - Edge intersection scanline
+
 namespace {
 
 	typedef unsigned short VertexIndex;
@@ -43,7 +45,7 @@ namespace {
 
 		 glm::vec3 eyePos;	// eye space position used for shading
 		 glm::vec3 eyeNor;	// eye space normal used for shading, cuz normal will go wrong after perspective transformation
-		// glm::vec3 col;
+		 glm::vec3 color;
 		 glm::vec2 texcoord0;
 		 TextureData* dev_diffuseTex = NULL;
 		// int texWidth, texHeight;
@@ -95,7 +97,6 @@ namespace {
 
 		// TODO: add more attributes when needed
 	};
-
 }
 
 static std::map<std::string, std::vector<PrimitiveDevBufPointers>> mesh2PrimitivesMap;
@@ -639,6 +640,24 @@ void _vertexTransformAndAssembly(
 		// Then divide the pos by its w element to transform into NDC space
 		// Finally transform x and y to viewport space
 
+		VertexOut* tempPtrToPrimitiveOutVertex = &primitive.dev_verticesOut[vid];
+		glm::vec4 tempPos = glm::vec4(primitive.dev_position[vid], 1.0f);
+
+		// Object space to un-homogenized coordinates
+		tempPos = MVP * tempPos;
+		
+		// re-homogenizing the coordinates
+		tempPos /= tempPos[3];
+
+		// NDC -> Pixel space
+		tempPos[0] = (1.0f - tempPos[0]) * width / 2.0f;
+		tempPos[1] = (1.0f - tempPos[1]) * height / 2.0f;
+
+		// Fill in the out variables
+		tempPtrToPrimitiveOutVertex->pos = tempPos;
+		tempPtrToPrimitiveOutVertex->eyePos = glm::vec3(MV * tempPos);		
+		tempPtrToPrimitiveOutVertex->eyeNor = MV_normal * primitive.dev_normal[vid];
+
 		// TODO: Apply vertex assembly here
 		// Assemble all attribute arraies into the primitive array
 		
@@ -660,20 +679,125 @@ void _primitiveAssembly(int numIndices, int curPrimitiveBeginId, Primitive* dev_
 		// TODO: uncomment the following code for a start
 		// This is primitive assembly for triangles
 
-		//int pid;	// id for cur primitives vector
-		//if (primitive.primitiveMode == TINYGLTF_MODE_TRIANGLES) {
-		//	pid = iid / (int)primitive.primitiveType;
-		//	dev_primitives[pid + curPrimitiveBeginId].v[iid % (int)primitive.primitiveType]
-		//		= primitive.dev_verticesOut[primitive.dev_indices[iid]];
-		//}
-
+		int pid;	// id for cur primitives vector
+		if (primitive.primitiveMode == TINYGLTF_MODE_TRIANGLES) {
+			pid = iid / (int)primitive.primitiveType;
+			dev_primitives[pid + curPrimitiveBeginId].v[iid % (int)primitive.primitiveType] = primitive.dev_verticesOut[primitive.dev_indices[iid]];
+		}
 
 		// TODO: other primitive types (point, line)
 	}
 	
 }
 
+__global__
+void _rasterizeGeometry(int totalNumPrimitives, Primitive* dev_primitives, Fragment* dev_fragmentBuffer, int* dev_depth, int width, int height) {
+	int index = threadIdx.x + (blockIdx.x * blockDim.x);
+	if (index >= totalNumPrimitives) {
+		return;
+	}
 
+	Primitive& tempPrimitive = dev_primitives[index];
+
+	// Create a trinagle
+	glm::vec3 thisTriangle[3] = { glm::vec3(tempPrimitive.v[0].pos),
+								  glm::vec3(tempPrimitive.v[1].pos),
+								  glm::vec3(tempPrimitive.v[2].pos) };
+
+	// Create a axis aligned bounding box
+	AABB aabb = getAABBForTriangle(thisTriangle);
+
+#if NAIVE_EDGEINTERSECTION_SCANLINE_TOGGLE
+	// Do scanLine rasterization
+	// Fill bounds and Clip them to screen size
+	float maxY = glm::min(aabb.max[1], (float)height);	
+	float minY = glm::max(aabb.min[1], 0.0f);
+
+	// Create LineSegments from vertices
+	LineSegment LS1 = createLineSegment(thisTriangle[0], thisTriangle[1]);
+	LineSegment LS2 = createLineSegment(thisTriangle[0], thisTriangle[2]);
+	LineSegment LS3 = createLineSegment(thisTriangle[1], thisTriangle[2]);
+
+	for (int i = minY; i <= maxY; i++) {
+		// Check for intersections and find the minX and maxX value for each pixel row
+		float minX = FLT_MAX;
+		float maxX = FLT_MIN;
+		int intersectionCount = 0;
+		
+		if (intersectWithLineSegemnt(LS1, i, minX, maxX, aabb)) {
+			intersectionCount++;
+		}
+
+		if (intersectWithLineSegemnt(LS2, i, minX, maxX, aabb)) {
+			intersectionCount++;
+		}
+		
+		if (intersectWithLineSegemnt(LS3, i, minX, maxX, aabb)) {
+			intersectionCount++;
+		}
+
+		if (intersectionCount < 2) {
+			continue;
+		}
+		
+		// Clip them to the screen size
+		minX = glm::max(minX, 0.0f);
+		maxX = glm::min(maxX, (float)width);
+		
+		for (int j = minX; j <= maxX; j++) {
+			
+			// Get the baricentric coordinate for position x, y (j, i)
+			glm::vec3 baryCentricCoordinate = calculateBarycentricCoordinate(thisTriangle, glm::vec2(j, i));
+
+			if (!isBarycentricCoordInBounds(baryCentricCoordinate)) {
+				continue;
+			}
+
+			int perspectiveCorrectZ = getZAtCoordinate(baryCentricCoordinate, thisTriangle) * 10000;
+
+			int pixelIndex = j + (i * width);
+
+			atomicMin(&dev_depth[pixelIndex], perspectiveCorrectZ);
+
+			if (dev_depth[pixelIndex] == perspectiveCorrectZ) {
+				dev_fragmentBuffer[pixelIndex].color = glm::vec3(0.98, 0.01, 0.01);
+			}
+
+		}
+	
+	}
+#else
+
+	// DO Naive scanline rendering
+	float minX = glm::max(aabb.min[0], 0.0f);
+	float maxX = glm::min(aabb.max[0], (float)(width - 1));
+	float minY = glm::max(aabb.min[1], 0.0f);
+	float maxY = glm::min(aabb.max[1], (float)(height - 1));
+
+	for (int y = minY; y <= maxY; y++) {
+		for (int x = minX; x <= maxX; x++) {
+
+			// Get the baricentric coordinate for position x, y on screen
+			glm::vec3 baryCentricCoordinate = calculateBarycentricCoordinate(thisTriangle, glm::vec2(x, y));
+
+			if (!isBarycentricCoordInBounds(baryCentricCoordinate)) {
+				continue;
+			}
+
+			int perspectiveCorrectZ = getZAtCoordinate(baryCentricCoordinate, thisTriangle) * 10000;
+
+			int pixelIndex = x + (y * width);
+
+			atomicMin(&dev_depth[pixelIndex], perspectiveCorrectZ);
+
+			if (dev_depth[pixelIndex] == perspectiveCorrectZ) {
+				dev_fragmentBuffer[pixelIndex].color = glm::vec3(0.98, 0.98, 0.98);
+			}
+
+		}
+	}
+#endif
+}
 
 /**
  * Perform rasterization.
@@ -723,8 +847,10 @@ void rasterize(uchar4 *pbo, const glm::mat4 & MVP, const glm::mat4 & MV, const g
 	initDepth << <blockCount2d, blockSize2d >> >(width, height, dev_depth);
 	
 	// TODO: rasterize
-
-
+	dim3 blockSize(128);
+	dim3 numBlocksPerTriangle((totalNumPrimitives + blockSize.x - 1) / blockSize.x);
+	_rasterizeGeometry<<<numBlocksPerTriangle, blockSize>>>(totalNumPrimitives, dev_primitives, dev_fragmentBuffer, dev_depth,  width, height);
+	checkCUDAError("rasterize geometry");
 
     // Copy depthbuffer colors into framebuffer
 	render << <blockCount2d, blockSize2d >> >(width, height, dev_fragmentBuffer, dev_framebuffer);
