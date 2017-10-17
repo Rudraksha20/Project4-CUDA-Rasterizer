@@ -18,7 +18,12 @@
 #include <glm/gtc/quaternion.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 
-#define NAIVE_EDGEINTERSECTION_SCANLINE_TOGGLE 1	// 0 - Naive scanline & 1 - Edge intersection scanline
+// Render Modes
+#define TRIANGLE 0
+#define POINTS 1
+#define LINES 0
+
+#define NAIVE_EDGEINTERSECTION_SCANLINE_TOGGLE 0	// 0 - Naive scanline & 1 - Edge intersection scanline
 
 namespace {
 
@@ -64,8 +69,8 @@ namespace {
 		// The attributes listed below might be useful, 
 		// but always feel free to modify on your own
 
-		// glm::vec3 eyePos;	// eye space position used for shading
-		// glm::vec3 eyeNor;
+		glm::vec3 eyePos;	// eye space position used for shading
+		glm::vec3 eyeNor;
 		// VertexAttributeTexcoord texcoord0;
 		// TextureData* dev_diffuseTex;
 		// ...
@@ -144,10 +149,18 @@ void render(int w, int h, Fragment *fragmentBuffer, glm::vec3 *framebuffer) {
     int index = x + (y * w);
 
     if (x < w && y < h) {
-        framebuffer[index] = fragmentBuffer[index].color;
+		glm::vec3 finalColor;
+		Fragment& thisFragment = fragmentBuffer[index];
 
+		finalColor = thisFragment.color;
+
+		// Lambert Shading
+		glm::vec3 LightDirection = glm::normalize(thisFragment.eyePos - glm::vec3(1.0f));
+		finalColor *= (glm::dot(LightDirection, thisFragment.eyeNor));
+		finalColor = glm::clamp(finalColor , 0.0f, 1.0f);
+
+		framebuffer[index] = finalColor;
 		// TODO: add your fragment shader code here
-
     }
 }
 
@@ -761,6 +774,10 @@ void _rasterizeGeometry(int totalNumPrimitives, Primitive* dev_primitives, Fragm
 
 			if (dev_depth[pixelIndex] == perspectiveCorrectZ) {
 				dev_fragmentBuffer[pixelIndex].color = glm::vec3(0.98, 0.01, 0.01);
+
+				// Interpolating the eye normals and the positions used for shading later
+				dev_fragmentBuffer[pixelIndex].eyePos = tempPrimitive.v[0].eyePos * baryCentricCoordinate.x + tempPrimitive.v[1].eyePos * baryCentricCoordinate.y + tempPrimitive.v[2].eyePos * baryCentricCoordinate.z;
+				dev_fragmentBuffer[pixelIndex].eyeNor = tempPrimitive.v[0].eyeNor * baryCentricCoordinate.x + tempPrimitive.v[1].eyeNor * baryCentricCoordinate.y + tempPrimitive.v[2].eyeNor * baryCentricCoordinate.z;
 			}
 
 		}
@@ -792,6 +809,10 @@ void _rasterizeGeometry(int totalNumPrimitives, Primitive* dev_primitives, Fragm
 
 			if (dev_depth[pixelIndex] == perspectiveCorrectZ) {
 				dev_fragmentBuffer[pixelIndex].color = glm::vec3(0.98, 0.98, 0.98);
+
+				// Interpolating the eye normals and the positions used for shading later
+				dev_fragmentBuffer[pixelIndex].eyePos = tempPrimitive.v[0].eyePos * baryCentricCoordinate.x + tempPrimitive.v[1].eyePos * baryCentricCoordinate.y + tempPrimitive.v[2].eyePos * baryCentricCoordinate.z;
+				dev_fragmentBuffer[pixelIndex].eyeNor = tempPrimitive.v[0].eyeNor * baryCentricCoordinate.x + tempPrimitive.v[1].eyeNor * baryCentricCoordinate.y + tempPrimitive.v[2].eyeNor * baryCentricCoordinate.z;
 			}
 
 		}
