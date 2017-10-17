@@ -193,3 +193,35 @@ float getZAtCoordinate(const glm::vec3 barycentricCoord, const glm::vec3 tri[3])
            + barycentricCoord.y * tri[1].z
            + barycentricCoord.z * tri[2].z);
 }
+
+/**
+*	Fills the depth buffer without race conditions or memory erite conflicts
+*/
+__device__
+bool fillDepthBufferWithMinValue(int* mutex, int* dev_depth, int perspectiveCorrectZ) {
+	// Loop-wait until this thread is able to execute its critical section.
+	if (perspectiveCorrectZ > *dev_depth) {
+		return false;
+	}
+
+	bool depthUpdated = false;
+
+	bool isSet;
+	do {
+		isSet = (atomicCAS(mutex, 0, 1) == 0);
+		if (isSet) {
+			// Critical section goes here.
+			// The critical section MUST be inside the wait loop;
+			// if it is afterward, a deadlock will occur.
+			if (perspectiveCorrectZ < *dev_depth) {
+				*dev_depth = perspectiveCorrectZ;
+				depthUpdated = true;
+			}
+		}
+		if (isSet) {
+			*mutex = 0;
+		}
+	} while (!isSet);
+
+	return depthUpdated;
+}

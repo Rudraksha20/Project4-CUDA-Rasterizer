@@ -19,11 +19,18 @@
 #include <glm/gtc/matrix_transform.hpp>
 
 // Render Modes
-#define TRIANGLE 0
-#define POINTS 1
+#define POINTS 0
 #define LINES 0
+#define TRIANGLES 1
 
+// Rasterization Methods (Renders Solid Triangles)
 #define NAIVE_EDGEINTERSECTION_SCANLINE_TOGGLE 0	// 0 - Naive scanline & 1 - Edge intersection scanline
+
+// Coloring
+#define SOLIDCOLOR 0
+#define COLOR glm::vec3(0.98f, 0.98f, 0.98f) // This is the color used for solid coloring
+
+#define TEXTURING 1
 
 namespace {
 
@@ -116,6 +123,7 @@ static Fragment *dev_fragmentBuffer = NULL;
 static glm::vec3 *dev_framebuffer = NULL;
 
 static int * dev_depth = NULL;	// you might need this buffer when doing depth test
+static int * dev_mutex = NULL;	// used for depth test without conflicts
 
 /**
  * Kernel that writes the image to the OpenGL PBO directly.
@@ -152,15 +160,20 @@ void render(int w, int h, Fragment *fragmentBuffer, glm::vec3 *framebuffer) {
 		glm::vec3 finalColor;
 		Fragment& thisFragment = fragmentBuffer[index];
 
+#if (POINTS || LINES)
 		finalColor = thisFragment.color;
-
+		finalColor = glm::clamp(finalColor, 0.0f, 1.0f);
+		framebuffer[index] = finalColor;
+#else
+		finalColor = thisFragment.color;
 		// Lambert Shading
 		glm::vec3 LightDirection = glm::normalize(thisFragment.eyePos - glm::vec3(1.0f));
 		finalColor *= (glm::dot(LightDirection, thisFragment.eyeNor));
-		finalColor = glm::clamp(finalColor , 0.0f, 1.0f);
 
+		finalColor = glm::clamp(finalColor , 0.0f, 1.0f);
 		framebuffer[index] = finalColor;
 		// TODO: add your fragment shader code here
+#endif
     }
 }
 
@@ -180,6 +193,8 @@ void rasterizeInit(int w, int h) {
 	cudaFree(dev_depth);
 	cudaMalloc(&dev_depth, width * height * sizeof(int));
 
+	cudaFree(dev_mutex);
+	cudaMalloc(&dev_mutex, width * height * sizeof(int));
 	checkCUDAError("rasterizeInit");
 }
 
@@ -196,6 +211,17 @@ void initDepth(int w, int h, int * depth)
 	}
 }
 
+__global__
+void initMutex(int w, int h, int * mutex) {
+	int x = (blockIdx.x * blockDim.x) + threadIdx.x;
+	int y = (blockIdx.y * blockDim.y) + threadIdx.y;
+
+	if (x < w && y < h)
+	{
+		int index = x + (y * w);
+		mutex[index] = 0;
+	}
+}
 
 /**
 * kern function with support for stride to sometimes replace cudaMemcpy
@@ -703,8 +729,79 @@ void _primitiveAssembly(int numIndices, int curPrimitiveBeginId, Primitive* dev_
 	
 }
 
+/**
+*	Draws a line given a line segment
+*/
+__device__
+void drawLine(LineSegment LS, Fragment* fragmentBuffer, int width, int height) {
+		// Bresenham's Algo.
+		// Refrence: https://en.wikipedia.org/wiki/Bresenham%27s_line_algorithm
+		// Refrence: https://rosettacode.org/wiki/Bitmap/Bresenham%27s_line_algorithm
+
+		int x0 = LS.vertex1.x;
+		int y0 = LS.vertex1.y;
+		int x1 = LS.vertex2.x;
+		int y1 = LS.vertex2.y;
+
+		bool steep = (glm::abs(y1 - y0) > glm::abs(x1 - x0));
+		int temp;
+		if (steep) {
+			temp = x0;
+			x0 = y0;
+			y0 = temp;
+
+			temp = x1;
+			x1 = y1;
+			y1 = temp;
+		}
+
+		if (x0 > x1) {
+			temp = x0;
+			x0 = x1;
+			x1 = temp;
+
+			temp = y0;
+			y0 = y1;
+			y1 = temp;
+		}
+	
+		float dx = x1 - x0;
+		float dy = glm::abs(y1 - y0);
+
+		float error = dx / 2.0f;
+		int ystep = (y0 < y1) ? 1 : -1;
+		int y = (int)y0;
+
+		int maxX = (int)x1;
+
+		for (int x = (int)x0; x<maxX; x++)
+		{
+			if (steep)
+			{
+				if ((x <= width && x >= 0) && (y <= height && y >= 0)) {
+					int pixelIndexP = y + (x * width);
+					fragmentBuffer[pixelIndexP].color = COLOR;
+				}
+			}
+			else
+			{
+				if ((x <= width && x >= 0) && (y <= height && y >= 0)) {
+					int pixelIndexP = x + (y * width);
+					fragmentBuffer[pixelIndexP].color = COLOR;
+				}
+			}
+
+			error -= dy;
+			if (error < 0)
+			{
+				y += ystep;
+				error += dx;
+			}
+		}
+}
+
 __global__
-void _rasterizeGeometry(int totalNumPrimitives, Primitive* dev_primitives, Fragment* dev_fragmentBuffer, int* dev_depth, int width, int height) {
+void _rasterizeGeometry(int totalNumPrimitives, Primitive* dev_primitives, Fragment* dev_fragmentBuffer, int* dev_depth, int* dev_mutex , int width, int height) {
 	int index = threadIdx.x + (blockIdx.x * blockDim.x);
 	if (index >= totalNumPrimitives) {
 		return;
@@ -720,8 +817,35 @@ void _rasterizeGeometry(int totalNumPrimitives, Primitive* dev_primitives, Fragm
 	// Create a axis aligned bounding box
 	AABB aabb = getAABBForTriangle(thisTriangle);
 
-#if NAIVE_EDGEINTERSECTION_SCANLINE_TOGGLE
-	// Do scanLine rasterization
+#if POINTS
+
+	for (int i = 0; i < 3; i++) {
+		int x = (int)thisTriangle[i].x;
+		int y = (int)thisTriangle[i].y;
+		if ((x <= width && x >= 0) && (y <= height && y >= 0)) {
+			int pixelIndexP = x + (y * width);
+			dev_fragmentBuffer[pixelIndexP].color = COLOR;
+		}
+	}
+
+#elif LINES
+		
+	// Create LineSegments from vertices
+	LineSegment LS1 = createLineSegment(thisTriangle[0], thisTriangle[1]);
+	LineSegment LS2 = createLineSegment(thisTriangle[0], thisTriangle[2]);
+	LineSegment LS3 = createLineSegment(thisTriangle[1], thisTriangle[2]);
+
+	// Draw these lines
+	drawLine(LS1, dev_fragmentBuffer, width, height);
+	drawLine(LS2, dev_fragmentBuffer, width, height);
+	drawLine(LS3, dev_fragmentBuffer, width, height);
+
+#elif TRIANGLES
+
+#if NAIVE_EDGEINTERSECTION_SCANLINE_TOGGLE	
+	
+	// Do ScanLine Edge Intersection Rasterization
+	
 	// Fill bounds and Clip them to screen size
 	float maxY = glm::min(aabb.max[1], (float)height);	
 	float minY = glm::max(aabb.min[1], 0.0f);
@@ -756,12 +880,12 @@ void _rasterizeGeometry(int totalNumPrimitives, Primitive* dev_primitives, Fragm
 		// Clip them to the screen size
 		minX = glm::max(minX, 0.0f);
 		maxX = glm::min(maxX, (float)width);
-		
-		for (int j = minX; j <= maxX; j++) {
 			
+		for (int j = minX; j <= maxX; j++) {
+				
 			// Get the baricentric coordinate for position x, y (j, i)
 			glm::vec3 baryCentricCoordinate = calculateBarycentricCoordinate(thisTriangle, glm::vec2(j, i));
-
+	
 			if (!isBarycentricCoordInBounds(baryCentricCoordinate)) {
 				continue;
 			}
@@ -770,11 +894,12 @@ void _rasterizeGeometry(int totalNumPrimitives, Primitive* dev_primitives, Fragm
 
 			int pixelIndex = j + (i * width);
 
-			atomicMin(&dev_depth[pixelIndex], perspectiveCorrectZ);
+			bool depthUpdated = fillDepthBufferWithMinValue(&dev_mutex[pixelIndex], &dev_depth[pixelIndex], perspectiveCorrectZ);
 
-			if (dev_depth[pixelIndex] == perspectiveCorrectZ) {
-				dev_fragmentBuffer[pixelIndex].color = glm::vec3(0.98, 0.01, 0.01);
-
+			if (depthUpdated) {
+#if SOLIDCOLOR
+				dev_fragmentBuffer[pixelIndex].color = COLOR;
+#endif
 				// Interpolating the eye normals and the positions used for shading later
 				dev_fragmentBuffer[pixelIndex].eyePos = tempPrimitive.v[0].eyePos * baryCentricCoordinate.x + tempPrimitive.v[1].eyePos * baryCentricCoordinate.y + tempPrimitive.v[2].eyePos * baryCentricCoordinate.z;
 				dev_fragmentBuffer[pixelIndex].eyeNor = tempPrimitive.v[0].eyeNor * baryCentricCoordinate.x + tempPrimitive.v[1].eyeNor * baryCentricCoordinate.y + tempPrimitive.v[2].eyeNor * baryCentricCoordinate.z;
@@ -783,9 +908,10 @@ void _rasterizeGeometry(int totalNumPrimitives, Primitive* dev_primitives, Fragm
 		}
 	
 	}
-#else
+#else	
+	
+	// Do Scanline Naive Rasterization
 
-	// DO Naive scanline rendering
 	float minX = glm::max(aabb.min[0], 0.0f);
 	float maxX = glm::min(aabb.max[0], (float)(width - 1));
 	float minY = glm::max(aabb.min[1], 0.0f);
@@ -801,22 +927,25 @@ void _rasterizeGeometry(int totalNumPrimitives, Primitive* dev_primitives, Fragm
 				continue;
 			}
 
-			int perspectiveCorrectZ = getZAtCoordinate(baryCentricCoordinate, thisTriangle) * 10000;
-
+			int perspectiveCorrectZ = getZAtCoordinate(baryCentricCoordinate, thisTriangle) * 1000;
+	
 			int pixelIndex = x + (y * width);
 
-			atomicMin(&dev_depth[pixelIndex], perspectiveCorrectZ);
+			bool depthUpdated = fillDepthBufferWithMinValue(&dev_mutex[pixelIndex], &dev_depth[pixelIndex], perspectiveCorrectZ);
 
-			if (dev_depth[pixelIndex] == perspectiveCorrectZ) {
-				dev_fragmentBuffer[pixelIndex].color = glm::vec3(0.98, 0.98, 0.98);
-
+			if (depthUpdated) {
+#if SOLIDCOLOR
+				dev_fragmentBuffer[pixelIndex].color = COLOR;
+#endif
 				// Interpolating the eye normals and the positions used for shading later
 				dev_fragmentBuffer[pixelIndex].eyePos = tempPrimitive.v[0].eyePos * baryCentricCoordinate.x + tempPrimitive.v[1].eyePos * baryCentricCoordinate.y + tempPrimitive.v[2].eyePos * baryCentricCoordinate.z;
 				dev_fragmentBuffer[pixelIndex].eyeNor = tempPrimitive.v[0].eyeNor * baryCentricCoordinate.x + tempPrimitive.v[1].eyeNor * baryCentricCoordinate.y + tempPrimitive.v[2].eyeNor * baryCentricCoordinate.z;
 			}
-
+	
 		}
 	}
+#endif
+
 #endif
 }
 
@@ -866,11 +995,13 @@ void rasterize(uchar4 *pbo, const glm::mat4 & MVP, const glm::mat4 & MV, const g
 	
 	cudaMemset(dev_fragmentBuffer, 0, width * height * sizeof(Fragment));
 	initDepth << <blockCount2d, blockSize2d >> >(width, height, dev_depth);
+	initMutex << <blockCount2d, blockSize2d >> >(width, height, dev_mutex);
+
 	
 	// TODO: rasterize
 	dim3 blockSize(128);
 	dim3 numBlocksPerTriangle((totalNumPrimitives + blockSize.x - 1) / blockSize.x);
-	_rasterizeGeometry<<<numBlocksPerTriangle, blockSize>>>(totalNumPrimitives, dev_primitives, dev_fragmentBuffer, dev_depth,  width, height);
+	_rasterizeGeometry<<<numBlocksPerTriangle, blockSize>>>(totalNumPrimitives, dev_primitives, dev_fragmentBuffer, dev_depth, dev_mutex,  width, height);
 	checkCUDAError("rasterize geometry");
 
     // Copy depthbuffer colors into framebuffer
@@ -918,6 +1049,9 @@ void rasterizeFree() {
 
 	cudaFree(dev_depth);
 	dev_depth = NULL;
+
+	cudaFree(dev_mutex);
+	dev_mutex = NULL;
 
     checkCUDAError("rasterize Free");
 }
