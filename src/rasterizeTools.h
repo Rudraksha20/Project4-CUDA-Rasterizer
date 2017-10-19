@@ -217,8 +217,6 @@ bool fillDepthBufferWithMinValue(int* mutex, int* dev_depth, int perspectiveCorr
 				*dev_depth = perspectiveCorrectZ;
 				depthUpdated = true;
 			}
-		}
-		if (isSet) {
 			*mutex = 0;
 		}
 	} while (!isSet);

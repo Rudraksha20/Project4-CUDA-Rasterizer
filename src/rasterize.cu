@@ -26,11 +26,23 @@
 // Rasterization Methods (Renders Solid Triangles)
 #define NAIVE_EDGEINTERSECTION_SCANLINE_TOGGLE 0	// 0 - Naive scanline & 1 - Edge intersection scanline
 
-// Coloring
+// Coloring (Either of the two should be on to have an output on the screen)
 #define SOLIDCOLOR 0
-#define COLOR glm::vec3(0.98f, 0.98f, 0.98f) // This is the color used for solid coloring
-
 #define TEXTURING 1
+#define PERSPECTIVECORRECTTEXTURING 1
+#define BILNEARFILTERING 1
+
+// This is the color used for solid coloring
+#define COLOR glm::vec3(0.98f, 0.98f, 0.98f)
+
+//  Shading
+#define LAMBERT 1
+
+// Back Face Culling
+#define BACKFACECULLING 1
+
+// Anti-Aliasing
+#define FXAA 1
 
 namespace {
 
@@ -60,13 +72,14 @@ namespace {
 		 glm::vec3 color;
 		 glm::vec2 texcoord0;
 		 TextureData* dev_diffuseTex = NULL;
-		// int texWidth, texHeight;
+		 int texWidth, texHeight;
 		// ...
 	};
 
 	struct Primitive {
 		PrimitiveType primitiveType = Triangle;	// C++ 11 init
 		VertexOut v[3];
+		bool culled;	// Used for triangle culling
 	};
 
 	struct Fragment {
@@ -78,8 +91,10 @@ namespace {
 
 		glm::vec3 eyePos;	// eye space position used for shading
 		glm::vec3 eyeNor;
-		// VertexAttributeTexcoord texcoord0;
-		// TextureData* dev_diffuseTex;
+		VertexAttributeTexcoord texcoord0;
+		TextureData* dev_diffuseTex;
+		int textureWidth;
+		int textureHeight;
 		// ...
 	};
 
@@ -147,6 +162,42 @@ void sendImageToPBO(uchar4 *pbo, int w, int h, glm::vec3 *image) {
     }
 }
 
+/**
+* Bilnear filtering
+*/
+__device__
+glm::vec3 bilinearFiltering(Fragment& tempfragment, float uvXf, float uvYf) {
+	int uvX0 = uvXf;
+	int uvY0 = uvYf;
+	int uvX1 = glm::clamp(uvX0 + 1, 0, tempfragment.textureWidth - 1);
+	int uvY1 = glm::clamp(uvY0 + 1, 0, tempfragment.textureHeight - 1);
+	glm::vec3 finalColor;
+	int uvIndex;
+	
+	// Get the color of the four surrounding pixels
+	uvIndex = (uvX0 + (uvY0 * tempfragment.textureWidth)) * 3;
+	glm::vec3 colorX0Y0 = (glm::vec3(tempfragment.dev_diffuseTex[uvIndex], tempfragment.dev_diffuseTex[uvIndex + 1], tempfragment.dev_diffuseTex[uvIndex + 2])) / 255.0f;
+	
+	uvIndex = (uvX1 + (uvY0 * tempfragment.textureWidth)) * 3;
+	glm::vec3 colorX1Y0 = (glm::vec3(tempfragment.dev_diffuseTex[uvIndex], tempfragment.dev_diffuseTex[uvIndex + 1], tempfragment.dev_diffuseTex[uvIndex + 2])) / 255.0f;
+	
+	uvIndex = (uvX0 + (uvY1 * tempfragment.textureWidth)) * 3;
+	glm::vec3 colorX0Y1 = (glm::vec3(tempfragment.dev_diffuseTex[uvIndex], tempfragment.dev_diffuseTex[uvIndex + 1], tempfragment.dev_diffuseTex[uvIndex + 2])) / 255.0f;
+	
+	uvIndex = (uvX1 + (uvY1 * tempfragment.textureWidth)) * 3;
+	glm::vec3 colorX1Y1 = (glm::vec3(tempfragment.dev_diffuseTex[uvIndex], tempfragment.dev_diffuseTex[uvIndex + 1], tempfragment.dev_diffuseTex[uvIndex + 2])) / 255.0f;
+
+	// Bilinearly in terpolate between the colors based on the fractional part in the uvs
+	float weightY = uvYf - uvY0;
+	float weightX = uvXf - uvX0;
+	glm::vec3 interpColorY0 = glm::mix(colorX0Y0, colorX1Y0, weightX);
+	glm::vec3 interpColorY1 = glm::mix(colorX0Y1, colorX1Y1, weightX);
+	finalColor = glm::mix(interpColorY0, interpColorY1, weightY);
+
+	// Return the final color
+	return finalColor;
+}
+
 /** 
 * Writes fragment colors to the framebuffer
 */
@@ -161,19 +212,63 @@ void render(int w, int h, Fragment *fragmentBuffer, glm::vec3 *framebuffer) {
 		Fragment& thisFragment = fragmentBuffer[index];
 
 #if (POINTS || LINES)
+
 		finalColor = thisFragment.color;
 		finalColor = glm::clamp(finalColor, 0.0f, 1.0f);
 		framebuffer[index] = finalColor;
-#else
-		finalColor = thisFragment.color;
-		// Lambert Shading
-		glm::vec3 LightDirection = glm::normalize(thisFragment.eyePos - glm::vec3(1.0f));
-		finalColor *= (glm::dot(LightDirection, thisFragment.eyeNor));
 
-		finalColor = glm::clamp(finalColor , 0.0f, 1.0f);
-		framebuffer[index] = finalColor;
-		// TODO: add your fragment shader code here
+#elif TEXTURING
+		
+		if (thisFragment.dev_diffuseTex != NULL) {
+
+#if BILNEARFILTERING
+
+			float uvXf = thisFragment.texcoord0.x * thisFragment.textureWidth;
+			float uvYf = thisFragment.texcoord0.y * thisFragment.textureHeight;
+
+			finalColor = bilinearFiltering(thisFragment, uvXf, uvYf);
+
+#else
+
+			// Get color form the texture and store it.
+			int uvX = thisFragment.texcoord0.x * thisFragment.textureWidth;
+			int uvY = thisFragment.texcoord0.y * thisFragment.textureHeight;
+
+			int uvIndex = (uvX + (uvY * thisFragment.textureWidth)) * 3;
+			finalColor = glm::vec3(thisFragment.dev_diffuseTex[uvIndex], thisFragment.dev_diffuseTex[uvIndex + 1], thisFragment.dev_diffuseTex[uvIndex + 2]);
+			finalColor /= 255.0f;
+
 #endif
+		
+		}
+
+#if LAMBERT
+
+		// Diffuse/Lambert shading
+		glm::vec3 LightDirection = glm::normalize(thisFragment.eyePos - glm::vec3(100.0f));
+		finalColor *= (glm::dot(-LightDirection, thisFragment.eyeNor));
+
+#endif
+
+		finalColor = glm::clamp(finalColor, 0.0f, 1.0f);
+		framebuffer[index] = finalColor;
+
+#elif SOLIDCOLOR
+
+#if LAMBERT
+
+		// Lambert Shading
+		finalColor = thisFragment.color;
+		glm::vec3 LightDirection = glm::normalize(thisFragment.eyePos - glm::vec3(100.0f));
+		finalColor *= (glm::dot(-LightDirection, thisFragment.eyeNor));
+
+#endif
+
+		finalColor = glm::clamp(finalColor , 0.1f, 1.0f);
+		framebuffer[index] = finalColor;
+
+#endif
+		// TODO: add your fragment shader code here
     }
 }
 
@@ -680,7 +775,9 @@ void _vertexTransformAndAssembly(
 		// Finally transform x and y to viewport space
 
 		VertexOut* tempPtrToPrimitiveOutVertex = &primitive.dev_verticesOut[vid];
-		glm::vec4 tempPos = glm::vec4(primitive.dev_position[vid], 1.0f);
+
+		glm::vec4 objSpacePos = glm::vec4(primitive.dev_position[vid], 1.0f);
+		glm::vec4 tempPos = objSpacePos;
 
 		// Object space to un-homogenized coordinates
 		tempPos = MVP * tempPos;
@@ -691,18 +788,25 @@ void _vertexTransformAndAssembly(
 		// NDC -> Pixel space
 		tempPos[0] = (1.0f - tempPos[0]) * width / 2.0f;
 		tempPos[1] = (1.0f - tempPos[1]) * height / 2.0f;
+		tempPos[2] = -tempPos[2];
 
 		// Fill in the out variables
 		tempPtrToPrimitiveOutVertex->pos = tempPos;
-		tempPtrToPrimitiveOutVertex->eyePos = glm::vec3(MV * tempPos);		
-		tempPtrToPrimitiveOutVertex->eyeNor = MV_normal * primitive.dev_normal[vid];
+		tempPtrToPrimitiveOutVertex->eyePos = glm::vec3(MV * objSpacePos);
+		tempPtrToPrimitiveOutVertex->eyeNor = glm::normalize(MV_normal * primitive.dev_normal[vid]);
+
+#if TEXTURING
+		tempPtrToPrimitiveOutVertex->texcoord0 = primitive.dev_texcoord0[vid];	// These are UV's
+		tempPtrToPrimitiveOutVertex->dev_diffuseTex = primitive.dev_diffuseTex;
+		tempPtrToPrimitiveOutVertex->texWidth = primitive.diffuseTexWidth;
+		tempPtrToPrimitiveOutVertex->texHeight = primitive.diffuseTexHeight;
+#endif
 
 		// TODO: Apply vertex assembly here
 		// Assemble all attribute arraies into the primitive array
 		
 	}
 }
-
 
 
 static int curPrimitiveBeginId = 0;
@@ -722,6 +826,17 @@ void _primitiveAssembly(int numIndices, int curPrimitiveBeginId, Primitive* dev_
 		if (primitive.primitiveMode == TINYGLTF_MODE_TRIANGLES) {
 			pid = iid / (int)primitive.primitiveType;
 			dev_primitives[pid + curPrimitiveBeginId].v[iid % (int)primitive.primitiveType] = primitive.dev_verticesOut[primitive.dev_indices[iid]];
+		
+#if BACKFACECULLING
+			glm::vec3 cameraDirection(0.0f, 0.0f, 1.0f);
+			if (glm::dot(cameraDirection, primitive.dev_verticesOut[primitive.dev_indices[iid]].eyeNor) <= 0.0f) {
+				dev_primitives[pid + curPrimitiveBeginId].culled = true;
+			}
+			else {
+				dev_primitives[pid + curPrimitiveBeginId].culled = false;
+			}
+#endif
+
 		}
 
 		// TODO: other primitive types (point, line)
@@ -808,6 +923,12 @@ void _rasterizeGeometry(int totalNumPrimitives, Primitive* dev_primitives, Fragm
 	}
 
 	Primitive& tempPrimitive = dev_primitives[index];
+
+#if BACKFACECULLING
+	if (tempPrimitive.culled == true) {
+		return;
+	}
+#endif
 
 	// Create a trinagle
 	glm::vec3 thisTriangle[3] = { glm::vec3(tempPrimitive.v[0].pos),
@@ -897,12 +1018,40 @@ void _rasterizeGeometry(int totalNumPrimitives, Primitive* dev_primitives, Fragm
 			bool depthUpdated = fillDepthBufferWithMinValue(&dev_mutex[pixelIndex], &dev_depth[pixelIndex], perspectiveCorrectZ);
 
 			if (depthUpdated) {
+				// Interpolating the eye normals and the positions used for shading later
+				dev_fragmentBuffer[pixelIndex].eyePos = tempPrimitive.v[0].eyePos * baryCentricCoordinate.x
+					+ tempPrimitive.v[1].eyePos * baryCentricCoordinate.y
+					+ tempPrimitive.v[2].eyePos * baryCentricCoordinate.z;
+				dev_fragmentBuffer[pixelIndex].eyeNor = tempPrimitive.v[0].eyeNor * baryCentricCoordinate.x
+					+ tempPrimitive.v[1].eyeNor * baryCentricCoordinate.y
+					+ tempPrimitive.v[2].eyeNor * baryCentricCoordinate.z;
+
 #if SOLIDCOLOR
 				dev_fragmentBuffer[pixelIndex].color = COLOR;
+#elif TEXTURING
+
+#if PERSPECTIVECORRECTTEXTURING
+				float z0 = tempPrimitive.v[0].eyePos.z;
+				float z1 = tempPrimitive.v[1].eyePos.z;
+				float z2 = tempPrimitive.v[2].eyePos.z;
+
+				// Correctly interpolated z value
+				float z = baryCentricCoordinate.x / z0 + baryCentricCoordinate.y / z1 + baryCentricCoordinate.z / z2;
+
+				// Perspective corrected texture coordinates
+				dev_fragmentBuffer[pixelIndex].texcoord0 = (tempPrimitive.v[0].texcoord0 / z0 * baryCentricCoordinate.x
+															+ tempPrimitive.v[1].texcoord0 / z1 * baryCentricCoordinate.y
+															+ tempPrimitive.v[2].texcoord0 / z2 * baryCentricCoordinate.z) / z;
+#else
+				dev_fragmentBuffer[pixelIndex].texcoord0 = tempPrimitive.v[0].texcoord0 * baryCentricCoordinate.x
+															+ tempPrimitive.v[1].texcoord0 * baryCentricCoordinate.y
+															+ tempPrimitive.v[2].texcoord0 * baryCentricCoordinate.z;
 #endif
-				// Interpolating the eye normals and the positions used for shading later
-				dev_fragmentBuffer[pixelIndex].eyePos = tempPrimitive.v[0].eyePos * baryCentricCoordinate.x + tempPrimitive.v[1].eyePos * baryCentricCoordinate.y + tempPrimitive.v[2].eyePos * baryCentricCoordinate.z;
-				dev_fragmentBuffer[pixelIndex].eyeNor = tempPrimitive.v[0].eyeNor * baryCentricCoordinate.x + tempPrimitive.v[1].eyeNor * baryCentricCoordinate.y + tempPrimitive.v[2].eyeNor * baryCentricCoordinate.z;
+				dev_fragmentBuffer[pixelIndex].textureWidth = tempPrimitive.v[0].texWidth;
+				dev_fragmentBuffer[pixelIndex].textureHeight = tempPrimitive.v[0].texHeight;
+				dev_fragmentBuffer[pixelIndex].dev_diffuseTex = tempPrimitive.v[0].dev_diffuseTex;
+
+#endif
 			}
 
 		}
@@ -927,19 +1076,47 @@ void _rasterizeGeometry(int totalNumPrimitives, Primitive* dev_primitives, Fragm
 				continue;
 			}
 
-			int perspectiveCorrectZ = getZAtCoordinate(baryCentricCoordinate, thisTriangle) * 1000;
+			int perspectiveCorrectZ = getZAtCoordinate(baryCentricCoordinate, thisTriangle) * 10000;
 	
 			int pixelIndex = x + (y * width);
 
 			bool depthUpdated = fillDepthBufferWithMinValue(&dev_mutex[pixelIndex], &dev_depth[pixelIndex], perspectiveCorrectZ);
 
 			if (depthUpdated) {
+				// Interpolating the eye normals and the positions used for shading later
+				dev_fragmentBuffer[pixelIndex].eyePos = tempPrimitive.v[0].eyePos * baryCentricCoordinate.x
+					+ tempPrimitive.v[1].eyePos * baryCentricCoordinate.y
+					+ tempPrimitive.v[2].eyePos * baryCentricCoordinate.z;
+				dev_fragmentBuffer[pixelIndex].eyeNor = tempPrimitive.v[0].eyeNor * baryCentricCoordinate.x
+					+ tempPrimitive.v[1].eyeNor * baryCentricCoordinate.y
+					+ tempPrimitive.v[2].eyeNor * baryCentricCoordinate.z;
+
 #if SOLIDCOLOR
 				dev_fragmentBuffer[pixelIndex].color = COLOR;
+#elif TEXTURING
+
+#if PERSPECTIVECORRECTTEXTURING
+				float z0 = tempPrimitive.v[0].eyePos.z;
+				float z1 = tempPrimitive.v[1].eyePos.z;
+				float z2 = tempPrimitive.v[2].eyePos.z;
+
+				// Correctly interpolated z value
+				float z = baryCentricCoordinate.x / z0 + baryCentricCoordinate.y / z1 + baryCentricCoordinate.z / z2;
+
+				// Perspective corrected texture coordinates
+				dev_fragmentBuffer[pixelIndex].texcoord0 = (tempPrimitive.v[0].texcoord0 / z0 * baryCentricCoordinate.x 
+															+ tempPrimitive.v[1].texcoord0 / z1 * baryCentricCoordinate.y 
+															+ tempPrimitive.v[2].texcoord0 / z2 * baryCentricCoordinate.z) / z;
+#else
+				dev_fragmentBuffer[pixelIndex].texcoord0 = tempPrimitive.v[0].texcoord0 * baryCentricCoordinate.x 
+															+ tempPrimitive.v[1].texcoord0 * baryCentricCoordinate.y 
+															+ tempPrimitive.v[2].texcoord0 * baryCentricCoordinate.z;
 #endif
-				// Interpolating the eye normals and the positions used for shading later
-				dev_fragmentBuffer[pixelIndex].eyePos = tempPrimitive.v[0].eyePos * baryCentricCoordinate.x + tempPrimitive.v[1].eyePos * baryCentricCoordinate.y + tempPrimitive.v[2].eyePos * baryCentricCoordinate.z;
-				dev_fragmentBuffer[pixelIndex].eyeNor = tempPrimitive.v[0].eyeNor * baryCentricCoordinate.x + tempPrimitive.v[1].eyeNor * baryCentricCoordinate.y + tempPrimitive.v[2].eyeNor * baryCentricCoordinate.z;
+				dev_fragmentBuffer[pixelIndex].textureWidth = tempPrimitive.v[0].texWidth;
+				dev_fragmentBuffer[pixelIndex].textureHeight = tempPrimitive.v[0].texHeight;
+				dev_fragmentBuffer[pixelIndex].dev_diffuseTex = tempPrimitive.v[0].dev_diffuseTex;
+
+#endif
 			}
 	
 		}
@@ -997,7 +1174,6 @@ void rasterize(uchar4 *pbo, const glm::mat4 & MVP, const glm::mat4 & MV, const g
 	initDepth << <blockCount2d, blockSize2d >> >(width, height, dev_depth);
 	initMutex << <blockCount2d, blockSize2d >> >(width, height, dev_mutex);
 
-	
 	// TODO: rasterize
 	dim3 blockSize(128);
 	dim3 numBlocksPerTriangle((totalNumPrimitives + blockSize.x - 1) / blockSize.x);
