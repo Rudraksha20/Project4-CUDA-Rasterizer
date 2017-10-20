@@ -42,7 +42,8 @@
 
 // Anti-Aliasing
 #define FXAA 1	// Fast Approximation AA (Post Processing)
-#define SSAA 1
+#define SSAA 0	// SSAA toggle
+#define SSAAMULTIPLYER 4 // 1x is no SSAA. Increase this value to increase the resolution and SSAA effect
 
 namespace {
 
@@ -151,19 +152,53 @@ __global__
 void sendImageToPBO(uchar4 *pbo, int w, int h, glm::vec3 *image) {
     int x = (blockIdx.x * blockDim.x) + threadIdx.x;
     int y = (blockIdx.y * blockDim.y) + threadIdx.y;
-    int index = x + (y * w);
 
-    if (x < w && y < h) {
+#if SSAA
+	
+	int downWidth = w / SSAAMULTIPLYER;
+	int downHeight = h / SSAAMULTIPLYER;
+    int index = x + (y * downWidth);
+
+    if (x < downWidth && y < downHeight) {
         glm::vec3 color;
-        color.x = glm::clamp(image[index].x, 0.0f, 1.0f) * 255.0;
-        color.y = glm::clamp(image[index].y, 0.0f, 1.0f) * 255.0;
-        color.z = glm::clamp(image[index].z, 0.0f, 1.0f) * 255.0;
-        // Each thread writes one pixel location in the texture (textel)
+
+		// Down sampling the image to the original size
+		for (int i = 0; i < SSAAMULTIPLYER; i++) {
+			for (int j = 0; j < SSAAMULTIPLYER; j++) {
+				int idx = (x * SSAAMULTIPLYER) + i + (y * SSAAMULTIPLYER + j) * w;
+				color.x += glm::clamp(image[idx].x, 0.0f, 1.0f) * 255.0;
+				color.y += glm::clamp(image[idx].y, 0.0f, 1.0f) * 255.0;
+				color.z += glm::clamp(image[idx].z, 0.0f, 1.0f) * 255.0;
+			}
+		}
+		color /= (SSAAMULTIPLYER*SSAAMULTIPLYER);
+
+		// Each thread writes one pixel location in the texture (textel)
         pbo[index].w = 0;
         pbo[index].x = color.x;
         pbo[index].y = color.y;
         pbo[index].z = color.z;
     }
+
+#else
+	
+	int index = x + (y * w);
+
+	if (x < w && y < h) {
+		glm::vec3 color;
+		
+		color.x = glm::clamp(image[index].x, 0.0f, 1.0f) * 255.0;
+		color.y = glm::clamp(image[index].y, 0.0f, 1.0f) * 255.0;
+		color.z = glm::clamp(image[index].z, 0.0f, 1.0f) * 255.0;
+		
+		// Each thread writes one pixel location in the texture (textel)
+		pbo[index].w = 0;
+		pbo[index].x = color.x;
+		pbo[index].y = color.y;
+		pbo[index].z = color.z;
+	}
+
+#endif
 }
 
 /**
@@ -280,8 +315,18 @@ void render(int w, int h, Fragment *fragmentBuffer, glm::vec3 *framebuffer) {
  * Called once at the beginning of the program to allocate memory.
  */
 void rasterizeInit(int w, int h) {
-    width = w;
-    height = h;
+#if SSAA
+
+	width = w * SSAAMULTIPLYER;
+    height = h * SSAAMULTIPLYER;
+
+#else
+
+	width = w;
+	height = h;
+
+#endif
+
 	cudaFree(dev_fragmentBuffer);
 	cudaMalloc(&dev_fragmentBuffer, width * height * sizeof(Fragment));
 	cudaMemset(dev_fragmentBuffer, 0, width * height * sizeof(Fragment));
