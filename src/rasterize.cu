@@ -41,7 +41,7 @@
 #define BACKFACECULLING 0
 
 // Anti-Aliasing
-#define FXAA 1	// Fast Approximation AA (Post Processing)
+#define FXAA 0	// Fast Approximation AA (Post Processing)
 #define SSAA 0	// SSAA toggle
 #define SSAAMULTIPLYER 4 // 1x is no SSAA. Increase this value to increase the resolution and SSAA effect
 
@@ -1186,7 +1186,7 @@ void _rasterizeGeometry(int totalNumPrimitives, Primitive* dev_primitives, Fragm
 
 /**
 *	Perform FXAA
-*	Reference tutorial : http://blog.simonrodriguez.fr/articles/30-07-2016_implementing_fxaa.html
+*	Reference: https://blog.codinghorror.com/fast-approximate-anti-aliasing-fxaa/
 */
 __global__
 void FXAAkern(int width, int height, glm::vec3* dev_framebuffer, glm::vec3* dev_temp_framebuffer, float FXAA_SPAN_MAX, float FXAA_EDGE_THRESHOLD_MAX, float FXAA_EDGE_THRESHOLD_MIN, float* dev_quality) {
