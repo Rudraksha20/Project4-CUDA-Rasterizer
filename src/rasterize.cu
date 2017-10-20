@@ -17,8 +17,9 @@
 #include "rasterize.h"
 #include <glm/gtc/quaternion.hpp>
 #include <glm/gtc/matrix_transform.hpp>
+#include <chrono>
 
-// Render Modes
+// Render Modes (One of them needs to be toggled on to render something on the screen)
 #define POINTS 0
 #define LINES 0
 #define TRIANGLES 1
@@ -30,7 +31,7 @@
 #define SOLIDCOLOR 0
 #define TEXTURING 1
 #define PERSPECTIVECORRECTTEXTURING 1
-#define BILNEARFILTERING 0
+#define BILNEARFILTERING 1
 // This is the color used for solid coloring
 #define COLOR glm::vec3(0.98f, 0.98f, 0.98f)
 
@@ -38,12 +39,16 @@
 #define LAMBERT 1
 
 // Back Face Culling
-#define BACKFACECULLING 0
+#define BACKFACECULLING 1
 
 // Anti-Aliasing
-#define FXAA 0	// Fast Approximation AA (Post Processing)
+#define FXAA 1	// Fast Approximation AA (Post Processing)
 #define SSAA 0	// SSAA toggle
 #define SSAAMULTIPLYER 4 // 1x is no SSAA. Increase this value to increase the resolution and SSAA effect
+
+// Performance Analysis
+#define PERFORMANCE_ANALYSIS_PER_RASTERIZATION_CALL 1
+
 
 namespace {
 
@@ -163,9 +168,9 @@ void sendImageToPBO(uchar4 *pbo, int w, int h, glm::vec3 *image) {
         glm::vec3 color;
 
 		// Down sampling the image to the original size
-		for (int i = 0; i < SSAAMULTIPLYER; i++) {
-			for (int j = 0; j < SSAAMULTIPLYER; j++) {
-				int idx = (x * SSAAMULTIPLYER) + i + (y * SSAAMULTIPLYER + j) * w;
+		for (int i = x; i < x + SSAAMULTIPLYER; i++) {
+			for (int j = y; j < y + SSAAMULTIPLYER; j++) {
+				int idx = (i * SSAAMULTIPLYER) + (j * SSAAMULTIPLYER * w);
 				color.x += glm::clamp(image[idx].x, 0.0f, 1.0f) * 255.0;
 				color.y += glm::clamp(image[idx].y, 0.0f, 1.0f) * 255.0;
 				color.z += glm::clamp(image[idx].z, 0.0f, 1.0f) * 255.0;
@@ -907,8 +912,7 @@ void _primitiveAssembly(int numIndices, int curPrimitiveBeginId, Primitive* dev_
 __device__
 void drawLine(LineSegment LS, Fragment* fragmentBuffer, int width, int height) {
 		// Bresenham's Algo.
-		// Refrence: https://en.wikipedia.org/wiki/Bresenham%27s_line_algorithm
-		// Refrence: https://rosettacode.org/wiki/Bitmap/Bresenham%27s_line_algorithm
+		// Wiki Reference: https://en.wikipedia.org/wiki/Bresenham%27s_line_algorithm
 
 		int x0 = LS.vertex1.x;
 		int y0 = LS.vertex1.y;
@@ -1194,7 +1198,19 @@ void FXAAkern(int width, int height, glm::vec3* dev_framebuffer, glm::vec3* dev_
 	int y0 = (blockIdx.y * blockDim.y) + threadIdx.y;
 	int index = x0 + (y0 * width);
 
+	// STEPS for FXAA:
+	// 1. Find the luma of the pixels up, down, right and left of the given pixel
+	// 2. Find the min and the max luma deviance and if it is below the threshold return. No AA will be performed as it is not an edge.
+	// 3. Find the luma of all the corner points and find the difference in luma horizontally and vertically.
+	// 4. Check if the luma deviation is more vertically or horizontally to determine the edge direction.
+	// 5. Once the edge is determined we ofset the uv coordinates (in out case the fragment index) to be as close as to the pixel edge.
+	// 6. Now iterate on both siedes of the current pixel along the edge till we treach the end i.e. a significant gradient drop. This means we have reached the end of the edge.
+	// 7. Now we average the pixel uv coordinates based on how close it is to the either edge
+	// 8. Color the pixel
+
 	if (x0 < width && y0 < height) {
+		// 1. Find the luma of the pixels up, down, right and left of the given pixel
+
 		int x1 = glm::clamp(x0 + 1, 0, width - 1);
 		int y1 = glm::clamp(y0 + 1, 0, height - 1);
 		int xm1 = glm::clamp(x0 - 1, 0, width - 1);
@@ -1240,11 +1256,15 @@ void FXAAkern(int width, int height, glm::vec3* dev_framebuffer, glm::vec3* dev_
 		// Find the deviation (DELTA) of the luminosity for deciding if there is a significant edge to perform AA around the given pixel index
 		float delta = lumaMax - lumaMin;
 
+		// 2. Find the min and the max luma deviance and if it is below the threshold return. No AA will be performed as it is not an edge.
+
 		// If the deviation is not significant enough don't bother doing AA
 		if (delta < glm::max(FXAA_EDGE_THRESHOLD_MIN, lumaMax * FXAA_EDGE_THRESHOLD_MAX)) {
 			dev_temp_framebuffer[index] = dev_framebuffer[index];
 			return;
 		}
+
+		// 3. Find the luma of all the corner points and find the difference in luma horizontally and vertically.
 
 		// Combine the lumas
 		// Edge
@@ -1260,8 +1280,10 @@ void FXAAkern(int width, int height, glm::vec3* dev_framebuffer, glm::vec3* dev_
 		float edgeHorizontal = glm::abs(-2.0 * lumaLeft + lumaLeftCorners) + glm::abs(-2.0 * lumaCenter + lumaDownUp) * 2.0 + glm::abs(-2.0 * lumaRight + lumaRightCorners);
 		float edgeVertical = glm::abs(-2.0 * lumaUp + lumaUpCorners) + glm::abs(-2.0 * lumaCenter + lumaLeftRight) * 2.0 + glm::abs(-2.0 * lumaDown + lumaDownCorners);
 
-		// Is the local edge horizontal or vertical ?
+		// Is edge horizontal or vertical
 		bool isHorizontal = (edgeHorizontal >= edgeVertical);
+
+		// 4. Check if the luma deviation is more vertically or horizontally to determine the edge direction.
 
 		// Select the two neighboring texels lumas in the opposite direction to the local edge.
 		float luma1 = isHorizontal ? lumaDown : lumaLeft;
@@ -1275,7 +1297,6 @@ void FXAAkern(int width, int height, glm::vec3* dev_framebuffer, glm::vec3* dev_
 
 		// Gradient in the corresponding direction, normalized.
 		float gradientScaled = 0.25*glm::max(abs(gradient1), abs(gradient2));
-
 
 		// Choose the step size (one pixel) according to the edge direction.
 		float stepLength = isHorizontal ? (1.0f/height) : (1.0f/width);
@@ -1292,6 +1313,8 @@ void FXAAkern(int width, int height, glm::vec3* dev_framebuffer, glm::vec3* dev_
 			lumaLocalAverage = 0.5*(luma2 + lumaCenter);
 		}
 
+		// 5. Once the edge is determined we ofset the uv coordinates (in out case the fragment index) to be as close as to the pixel edge.
+
 		// Shift UV in the correct direction by half a pixel.
 		glm::vec2 currentUV = glm::vec2(x0, y0);
 		if (isHorizontal) {
@@ -1300,6 +1323,8 @@ void FXAAkern(int width, int height, glm::vec3* dev_framebuffer, glm::vec3* dev_
 		else {
 			currentUV.x += stepLength * 0.5;
 		}
+
+		// 6. Now iterate on both siedes of the current pixel along the edge till we treach the end i.e. a significant gradient drop. This means we have reached the end of the edge.
 
 		// Exploer the edge on both sides and find the endpoint
 		// Do the first iteration and you are done if you find the luminosity gradient is significant
@@ -1363,6 +1388,8 @@ void FXAAkern(int width, int height, glm::vec3* dev_framebuffer, glm::vec3* dev_
 		}
 		// Done iterating
 
+		// 7. Now we average the pixel uv coordinates based on how close it is to the either edge
+
 		// Now we estimate the offset if we are at the center of the edge or near the far sides.
 		// The closer we are to the far sides the more blurring will need to be done to make the edge look smooth
 
@@ -1393,16 +1420,7 @@ void FXAAkern(int width, int height, glm::vec3* dev_framebuffer, glm::vec3* dev_
 		// If the luma variation is incorrect, do not offset.
 		float finalOffset = correctVariation ? pixelOffset : 0.0;
 
-		// sub-pixel AA
-		float lumaAverage = (1.0 / 12.0) * (2.0 * (lumaDownUp + lumaLeftRight) + lumaLeftCorners + lumaRightCorners);
-		// Ratio of the delta between the global average and the center luma, over the luma range in the 3x3 neighborhood.
-		float subPixelOffset1 = glm::clamp(glm::abs(lumaAverage - lumaCenter) / delta, 0.0f, 1.0f);
-		float subPixelOffset2 = (-2.0 * subPixelOffset1 + 3.0) * subPixelOffset1 * subPixelOffset1;
-		// Compute a sub-pixel offset based on this delta.
-		float subPixelOffsetFinal = subPixelOffset2 * subPixelOffset2 * 0.75;// SUBPIXEL_QUALITY;
-
-		// Pick the biggest of the two offsets.
-		finalOffset = glm::max(finalOffset, subPixelOffsetFinal);
+		// 8. Color the pixel
 
 		// Compute the final UV coordinates.
 		glm::vec2 finalUv = glm::vec2(x0, y0);
@@ -1436,6 +1454,10 @@ void copyKern(int width, int height, glm::vec3* dev_framebuffer, glm::vec3* dev_
  * Perform rasterization.
  */
 void rasterize(uchar4 *pbo, const glm::mat4 & MVP, const glm::mat4 & MV, const glm::mat3 MV_normal) {
+#if PERFORMANCE_ANALYSIS_PER_RASTERIZATION_CALL
+	auto start = std::chrono::high_resolution_clock::now();
+#endif
+
     int sideLength2d = 8;
     dim3 blockSize2d(sideLength2d, sideLength2d);
     dim3 blockCount2d((width  - 1) / blockSize2d.x + 1,
@@ -1495,7 +1517,7 @@ void rasterize(uchar4 *pbo, const glm::mat4 & MVP, const glm::mat4 & MV, const g
 
 	// Do FXAA
 	// Fillup the quality array used for iterating over the pixel edge
-	float quality[12] = {1.5, 2.0, 2.0, 2.0, 2.0, 4.0, 8.0, 8.0, 8.0, 8.0, 8.0, 8.0};
+	float quality[12] = {1.5, 2.0, 2.0, 2.0, 4.0, 8.0, 4.0, 8.0, 8.0, 8.0, 16.0, 32.0};
 	cudaMemcpy(dev_quality, &quality, 12 * sizeof(float), cudaMemcpyHostToDevice);
 
 	float FXAA_SPAN_MAX = 12.0;	// This is the number of steps about a given pixel we will take at a given time 
@@ -1513,6 +1535,12 @@ void rasterize(uchar4 *pbo, const glm::mat4 & MVP, const glm::mat4 & MV, const g
     // Copy framebuffer into OpenGL buffer for OpenGL previewing
     sendImageToPBO<<<blockCount2d, blockSize2d>>>(pbo, width, height, dev_framebuffer);
     checkCUDAError("copy render result to pbo");
+
+#if PERFORMANCE_ANALYSIS_PER_RASTERIZATION_CALL
+	auto end = std::chrono::high_resolution_clock::now();
+	std::chrono::duration<double, std::milli> diff = end - start;
+	std::cout << "Time taken for Rasterization: " << diff.count() << " ms." << std::endl;
+#endif
 }
 
 /**
