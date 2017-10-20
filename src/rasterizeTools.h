@@ -223,3 +223,11 @@ bool fillDepthBufferWithMinValue(int* mutex, int* dev_depth, int perspectiveCorr
 
 	return depthUpdated;
 }
+
+/**
+*	Clamps a given intiger between min and max value
+*/
+__host__ __device__
+int clampVal(int valueToBeClamped, int min, int max) {
+	return glm::clamp(valueToBeClamped, min, max);
+}
