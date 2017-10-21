@@ -8,7 +8,7 @@ CUDA Rasterizer
 * Rudraksha Shah
 * Tested on: Windows 10, i7-7700HQ @ 2.80GHz 16GB, GTX 1050 4096MB (Personal Computer)
 
-![Truck Turn Table](./renders/truck_TT.gif)
+![Truck Turn Table](./renders/duck_TT.gif)
 
 ## Points and Lines Rasterization Renders
 
