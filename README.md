@@ -20,9 +20,12 @@ Texturing | Bi-Linear Filtering
 --- | ---
 ![T](./renders/checkerboard_T.png) | ![TBF](./renders/checkerboard_TBF.png)
 
-Texturinng | Texture - Perpective Correct Interpolation
---- | ---
-![T](./renders/truck_T.png) | ![TBF](./renders/truck_PCI.png)
+| Texturinng | Texture - Perpective Correct Interpolation |
+| --- | --- |
+| ![T](./renders/truck_t.png) | ![TBF](./renders/truck_PCI.png) |
+
+
+
 Overview
 ===========
 
@@ -134,3 +137,5 @@ Bloopers:
 * [FXAA tutorial](http://blog.simonrodriguez.fr/articles/30-07-2016_implementing_fxaa.html)
 * [tinygltfloader](https://github.com/syoyo/tinygltfloader) by [@soyoyo](https://github.com/syoyo)
 * [glTF Sample Models](https://github.com/KhronosGroup/glTF/blob/master/sampleModels/README.md)
+
+Thank you for reading through, I would love to hear your feedback on any improvements or suggestions!
