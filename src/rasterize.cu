@@ -21,17 +21,17 @@
 
 // Render Modes (One of them needs to be toggled on to render something on the screen)
 #define POINTS 0
-#define LINES 0
-#define TRIANGLES 1
+#define LINES 1
+#define TRIANGLES 0
 
 // Rasterization Methods (Renders Solid Triangles)
-#define NAIVE_EDGEINTERSECTION_SCANLINE_TOGGLE 0	// 0 - Naive scanline & 1 - Edge intersection scanline
+#define NAIVE_EDGEINTERSECTION_SCANLINE_TOGGLE 1	// 0 - Naive scanline & 1 - Edge intersection scanline
 
 // Coloring (Either of the two should be on to have an output on the screen)
 #define SOLIDCOLOR 0
 #define TEXTURING 1
 #define PERSPECTIVECORRECTTEXTURING 1
-#define BILNEARFILTERING 1
+#define BILNEARFILTERING 0
 // This is the color used for solid coloring
 #define COLOR glm::vec3(0.98f, 0.98f, 0.98f)
 
@@ -42,13 +42,17 @@
 #define BACKFACECULLING 1
 
 // Anti-Aliasing
-#define FXAA 1	// Fast Approximation AA (Post Processing)
+#define FXAA 0	// Fast Approximation AA (Post Processing)
 #define SSAA 0	// SSAA toggle
 #define SSAAMULTIPLYER 4 // 1x is no SSAA. Increase this value to increase the resolution and SSAA effect
 
 // Performance Analysis
-#define PERFORMANCE_ANALYSIS_PER_RASTERIZATION_CALL 1
-
+#define PERFORMANCE_ANALYSIS_PER_RASTERIZATION_CALL 0
+#define PA_VERTEX_PROCESS_PRIMITIVE_ASSEMBLY 0
+#define PA_RASTERIZATION 0
+#define PA_FRAGMENT_SHADING 0
+#define PA_FXAA 0
+#define PA_COPY_FRAME_BUFFER 0
 
 namespace {
 
@@ -168,9 +172,9 @@ void sendImageToPBO(uchar4 *pbo, int w, int h, glm::vec3 *image) {
         glm::vec3 color;
 
 		// Down sampling the image to the original size
-		for (int i = x; i < x + SSAAMULTIPLYER; i++) {
-			for (int j = y; j < y + SSAAMULTIPLYER; j++) {
-				int idx = (i * SSAAMULTIPLYER) + (j * SSAAMULTIPLYER * w);
+		for (int i = 0; i < SSAAMULTIPLYER; i++) {
+			for (int j = 0; j < SSAAMULTIPLYER; j++) {
+				int idx = (i + (x * SSAAMULTIPLYER)) + ((j + (y * SSAAMULTIPLYER)) * w);
 				color.x += glm::clamp(image[idx].x, 0.0f, 1.0f) * 255.0;
 				color.y += glm::clamp(image[idx].y, 0.0f, 1.0f) * 255.0;
 				color.z += glm::clamp(image[idx].z, 0.0f, 1.0f) * 255.0;
@@ -1466,6 +1470,9 @@ void rasterize(uchar4 *pbo, const glm::mat4 & MVP, const glm::mat4 & MV, const g
 	// Execute your rasterization pipeline here
 	// (See README for rasterization pipeline outline.)
 
+#if PA_VERTEX_PROCESS_PRIMITIVE_ASSEMBLY
+	auto PA_VPPA_Start = std::chrono::high_resolution_clock::now();
+#endif
 	// Vertex Process & primitive assembly
 	{
 		curPrimitiveBeginId = 0;
@@ -1497,10 +1504,20 @@ void rasterize(uchar4 *pbo, const glm::mat4 & MVP, const glm::mat4 & MV, const g
 
 		checkCUDAError("Vertex Processing and Primitive Assembly");
 	}
-	
+
+#if PA_VERTEX_PROCESS_PRIMITIVE_ASSEMBLY
+	auto PA_VPPA_End = std::chrono::high_resolution_clock::now();
+	std::chrono::duration<double, std::milli> PA_VPPA_Diff = PA_VPPA_End - PA_VPPA_Start;
+	std::cout << "Time taken for Vertex Processing and Primitive Assembly: " << PA_VPPA_Diff.count() << " ms." << std::endl;
+#endif
+
 	cudaMemset(dev_fragmentBuffer, 0, width * height * sizeof(Fragment));
 	initDepth << <blockCount2d, blockSize2d >> >(width, height, dev_depth);
 	initMutex << <blockCount2d, blockSize2d >> >(width, height, dev_mutex);
+
+#if PA_RASTERIZATION
+	auto PA_R_Start = std::chrono::high_resolution_clock::now();
+#endif
 
 	// TODO: rasterize
 	dim3 blockSize(128);
@@ -1508,9 +1525,33 @@ void rasterize(uchar4 *pbo, const glm::mat4 & MVP, const glm::mat4 & MV, const g
 	_rasterizeGeometry<<<numBlocksPerTriangle, blockSize>>>(totalNumPrimitives, dev_primitives, dev_fragmentBuffer, dev_depth, dev_mutex,  width, height);
 	checkCUDAError("rasterize geometry");
 
+#if PA_RASTERIZATION
+	auto PA_R_End = std::chrono::high_resolution_clock::now();
+	std::chrono::duration<double, std::milli> PA_R_Diff = PA_R_End - PA_R_Start;
+	std::cout << "Time taken for Rasterization: " << PA_R_Diff.count() << " ms." << std::endl;
+#endif
+
+#if PA_FRAGMENT_SHADING
+	auto PA_FS_Start = std::chrono::high_resolution_clock::now();
+#endif 
     // Copy depthbuffer colors into framebuffer
 	render << <blockCount2d, blockSize2d >> >(width, height, dev_fragmentBuffer, dev_framebuffer);
 	checkCUDAError("fragment shader");
+
+#if PA_FRAGMENT_SHADING
+	auto PA_FS_End = std::chrono::high_resolution_clock::now();
+	std::chrono::duration<double, std::milli> PA_FS_Diff = PA_FS_End - PA_FS_Start;
+	std::cout << "Time taken for Fragment Shading: " << PA_FS_Diff.count() << " ms." << std::endl;
+#endif 
+
+
+#if PA_COPY_FRAME_BUFFER
+	auto PA_CFB_Start = std::chrono::high_resolution_clock::now();
+#endif
+
+#if PA_FXAA
+	auto PA_FXAA_Start = std::chrono::high_resolution_clock::now();
+#endif
 
 // Anti-Aliasing Effect using post processing Fast Approximation AA
 #if FXAA
@@ -1532,9 +1573,21 @@ void rasterize(uchar4 *pbo, const glm::mat4 & MVP, const glm::mat4 & MV, const g
 
 #endif
 
+#if PA_FXAA
+	auto PA_FXAA_End = std::chrono::high_resolution_clock::now();
+	std::chrono::duration<double, std::milli> PA_FXAA_Diff = PA_FXAA_End - PA_FXAA_Start;
+	std::cout << "Time taken for FXAA: " << PA_FXAA_Diff.count() << " ms." << std::endl;
+#endif
+
     // Copy framebuffer into OpenGL buffer for OpenGL previewing
     sendImageToPBO<<<blockCount2d, blockSize2d>>>(pbo, width, height, dev_framebuffer);
     checkCUDAError("copy render result to pbo");
+
+#if PA_COPY_FRAME_BUFFER
+	auto PA_CFB_End = std::chrono::high_resolution_clock::now();
+	std::chrono::duration<double, std::milli> PA_CFB_Diff = PA_CFB_End - PA_CFB_Start;
+	std::cout << "Time taken for Copy Frame buffer: " << PA_CFB_Diff.count() << " ms." << std::endl;
+#endif
 
 #if PERFORMANCE_ANALYSIS_PER_RASTERIZATION_CALL
 	auto end = std::chrono::high_resolution_clock::now();
