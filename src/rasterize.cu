@@ -21,17 +21,17 @@
 
 // Render Modes (One of them needs to be toggled on to render something on the screen)
 #define POINTS 0
-#define LINES 1
-#define TRIANGLES 0
+#define LINES 0
+#define TRIANGLES 1
 
 // Rasterization Methods (Renders Solid Triangles)
-#define NAIVE_EDGEINTERSECTION_SCANLINE_TOGGLE 1	// 0 - Naive scanline & 1 - Edge intersection scanline
+#define NAIVE_EDGEINTERSECTION_SCANLINE_TOGGLE 0	// 0 - Naive scanline & 1 - Edge intersection scanline
 
 // Coloring (Either of the two should be on to have an output on the screen)
 #define SOLIDCOLOR 0
 #define TEXTURING 1
 #define PERSPECTIVECORRECTTEXTURING 1
-#define BILNEARFILTERING 0
+#define BILNEARFILTERING 1
 // This is the color used for solid coloring
 #define COLOR glm::vec3(0.98f, 0.98f, 0.98f)
 

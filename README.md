@@ -16,6 +16,8 @@ CUDA Rasterizer
 | --- | ---  |
 | ![Points](./renders/duck_points.png) | ![Lines](./renders/truck_lines.png) | 
 
+## Texturing Renders
+
 Texturing | Bi-Linear Filtering
 --- | ---
 ![T](./renders/checkerboard_T.png) | ![TBF](./renders/checkerboard_TBF.png)
